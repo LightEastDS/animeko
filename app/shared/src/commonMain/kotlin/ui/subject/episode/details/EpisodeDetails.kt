@@ -88,6 +88,7 @@ import me.him188.ani.app.data.models.subject.preferredDisplayName
 import me.him188.ani.app.domain.danmaku.DanmakuLoadingState
 import me.him188.ani.app.domain.episode.SetEpisodeCollectionTypeRequest
 import me.him188.ani.app.domain.episode.SubjectRecommendation
+import me.him188.ani.app.domain.episode.isAd
 import me.him188.ani.app.domain.media.TestMediaList
 import me.him188.ani.app.domain.media.cache.EpisodeCacheStatus
 import me.him188.ani.app.domain.media.cache.engine.MediaCacheEngineKey
@@ -480,46 +481,41 @@ fun EpisodeDetails(
             }
         } else null,
         subjectRecommendations = { horizontalPadding ->
-            item("subject_recommendation_header") {
-                SectionTitle {
-                    Text(stringResource(Lang.subject_episode_related_recommendations))
+            val validRecommendations = subjectRecommendations.filter { !it.isAd() }
+            if (validRecommendations.isNotEmpty()) {
+                item("subject_recommendation_header") {
+                    SectionTitle {
+                        Text(stringResource(Lang.subject_episode_related_recommendations))
+                    }
                 }
-            }
-            for (recommendation in subjectRecommendations) {
-                item("subject_recommendation_${recommendation.uniqueId}") {
-                    SubjectRecommendationCard(
-                        {
-                            val uri = recommendation.uri
-                            val targetSubjectId = recommendation.subjectId?.toInt()
-                            Analytics.recordEvent(SubjectRecommendationClick) {
-                                targetSubjectId?.let { put("subject_id", it) }
-                                uri?.let { put("target_uri", it) }
-                            }
-                            Analytics.recordEvent(SubjectEnter) {
-                                put("source", "episode_recommendation")
-                                targetSubjectId?.let { put("subject_id", it) }
-                                uri?.let { put("target_uri", it) }
-                            }
-                            if (uri != null) {
-                                browserNavigator.openBrowser(context, uri)
-                            } else if (targetSubjectId != null) {
-                                navigator.navigateSubjectDetails(
-                                    targetSubjectId,
-                                    SubjectDetailPlaceholder(
-                                        id = targetSubjectId,
-                                        name = recommendation.name,
-                                        nameCN = recommendation.nameCn ?: "",
-                                        coverUrl = recommendation.imageUrl,
-                                    ),
-                                )
-                            }
-                        },
-                        recommendation,
-                        Modifier
-                            .fillMaxWidth()
-                            .padding(horizontalPadding)
-                            .padding(bottom = 12.dp),
-                    )
+                for (recommendation in validRecommendations) {
+                    item("subject_recommendation_${recommendation.uniqueId}") {
+                        SubjectRecommendationCard(
+                            {
+                                val targetSubjectId = recommendation.subjectId?.toInt()
+                                if (targetSubjectId != null) {
+                                    Analytics.recordEvent(SubjectEnter) {
+                                        put("source", "episode_recommendation")
+                                        put("subject_id", targetSubjectId)
+                                    }
+                                    navigator.navigateSubjectDetails(
+                                        targetSubjectId,
+                                        SubjectDetailPlaceholder(
+                                            id = targetSubjectId,
+                                            name = recommendation.name,
+                                            nameCN = recommendation.nameCn ?: "",
+                                            coverUrl = recommendation.imageUrl,
+                                        ),
+                                    )
+                                }
+                            },
+                            recommendation,
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(horizontalPadding)
+                                .padding(bottom = 12.dp),
+                        )
+                    }
                 }
             }
         },

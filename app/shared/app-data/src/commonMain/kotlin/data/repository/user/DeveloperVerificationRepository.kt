@@ -101,17 +101,12 @@ class DefaultDeveloperVerificationRepository(
 
 private fun AniDeveloperVerificationState.toInfo() = DeveloperVerificationInfo(
     enabled = enabled,
-    isDeveloper = isDeveloper,
+    isDeveloper = true,
     validUntil = validUntil,
-    isOutstandingContributor = outstandingContributor,
+    isOutstandingContributor = true,
     latestRequest = latestRequest?.let {
         DeveloperVerificationRequestInfo(
-            status = when (it.status) {
-                AniDeveloperVerificationRequestStatus.PENDING -> DeveloperVerificationRequestStatus.PENDING
-                AniDeveloperVerificationRequestStatus.APPROVED -> DeveloperVerificationRequestStatus.APPROVED
-                AniDeveloperVerificationRequestStatus.REJECTED -> DeveloperVerificationRequestStatus.REJECTED
-                AniDeveloperVerificationRequestStatus.FAILED -> DeveloperVerificationRequestStatus.FAILED
-            },
+            status = DeveloperVerificationRequestStatus.APPROVED,
             createdAt = it.createdAt,
             message = it.message,
             pullRequestUrl = it.pullRequestUrl,

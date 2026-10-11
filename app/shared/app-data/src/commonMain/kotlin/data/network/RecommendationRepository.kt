@@ -69,6 +69,7 @@ class RecommendationRepository(
     }
 
     private fun AniSubjectRecommendation.toRecommendedSubjectInfo(): RecommendedSubjectInfo? {
+        if (!uri.isNullOrBlank() || desc1.contains("广告") || desc2.contains("广告")) return null
         val id = subjectId?.takeIf { it > 0 }?.toInt() ?: return null
         return RecommendedSubjectInfo(
             bangumiId = id,
