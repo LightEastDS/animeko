@@ -10,6 +10,7 @@
 package me.him188.ani.app.domain.media.selector
 
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.first
@@ -25,7 +26,9 @@ import me.him188.ani.app.domain.media.selector.testFramework.collectEvents
 import me.him188.ani.app.domain.media.selector.testFramework.runFetchMediaSelectorTestSuite
 import me.him188.ani.app.domain.media.selector.testFramework.runSimpleMediaSelectorTestSuite
 import me.him188.ani.app.domain.media.selector.testFramework.tier
+import me.him188.ani.app.domain.player.VideoLoadingState
 import me.him188.ani.app.domain.player.extension.PlayerLoadErrorHandler
+import me.him188.ani.app.domain.player.extension.PlayerLoadErrorHandling
 import me.him188.ani.datasources.api.source.MediaSourceKind
 import me.him188.ani.datasources.api.source.MediaSourceKind.WEB
 import me.him188.ani.test.DisabledOnNative
@@ -33,6 +36,7 @@ import me.him188.ani.utils.io.inSystem
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.milliseconds
@@ -65,7 +69,7 @@ class PlayerLoadErrorHandlerTest {
             getPreferKind = { MediaSourceKind.WEB },
             getSourceTiers = { preferenceApi.sourceTiers!! },
         )
-        val job = testScope().launch { handler.handleError(session, selector) }
+        val job = testScope().async { handler.handleError(session, selector) }
         testScope().runCurrent()
 
         // PINNED: ERR-05 先拉黑当前 selected, 再 delay 1s, delay 期间不换源
@@ -86,6 +90,8 @@ class PlayerLoadErrorHandlerTest {
         assertTrue(job.isCompleted)
         assertEquals(mediaB.mediaId, selector.selected.value?.mediaId)
         assertEquals(setOf(mediaA.mediaId), handler.blacklist)
+        val outcome = assertIs<PlayerLoadErrorHandling.Attempted>(job.await()).outcome
+        assertEquals(mediaB.mediaId, assertIs<MediaAutoSelectOutcome.Selected>(outcome).media.mediaId)
     }
 
     @Test
@@ -107,8 +113,9 @@ class PlayerLoadErrorHandlerTest {
             getPreferKind = { MediaSourceKind.WEB },
             getSourceTiers = { preferenceApi.sourceTiers!! },
         )
+        var handling: PlayerLoadErrorHandling? = null
         val collected = selector.collectEvents {
-            val job = testScope().launch { handler.handleError(session, selector) }
+            val job = testScope().launch { handling = handler.handleError(session, selector) }
             testScope().advanceTimeBy(10.seconds)
             testScope().runCurrent()
             assertTrue(job.isCompleted)
@@ -117,6 +124,7 @@ class PlayerLoadErrorHandlerTest {
         collected.expectNoEvents()
         assertEquals(dropped, selector.selected.value)
         assertTrue(handler.blacklist.isEmpty())
+        assertEquals(PlayerLoadErrorHandling.SkippedDroppedFile, handling)
     }
 
     @Test
@@ -127,6 +135,9 @@ class PlayerLoadErrorHandlerTest {
                 // tier=1 高于 InstantSelectTierThreshold(0), 该源永远进不了 instant 候选,
                 // 因此只有 lowTierToleranceDuration 超时后的 fallback 能选出东西.
                 val webA by web { tier = 1 }
+
+                // 仍在查询的源让容忍窗生效; 所有源都已结束时不必等容忍窗.
+                val pending by web { tier = 0 }
             }
         }
         val mediaA = media(kind = WEB, subjectName = initApi.subjectName)
@@ -163,6 +174,41 @@ class PlayerLoadErrorHandlerTest {
     }
 
     @Test
+    fun `player error switches to high tier right after the error delay when all sources finished`() =
+        runFetchMediaSelectorTestSuite {
+            initSubject("test")
+            val (_, session, sources) = configureFetchSession {
+                object {
+                    val webA by web { tier = 1 }
+                }
+            }
+            val mediaA = media(kind = WEB, subjectName = initApi.subjectName)
+            val mediaB = media(kind = WEB, subjectName = initApi.subjectName)
+            sources.webA.complete(mediaA, mediaB)
+            testScope().runCurrent()
+
+            selector.select(selector.filteredCandidatesMedia.first().single { it.mediaId == mediaA.mediaId })
+
+            val handler = PlayerLoadErrorHandler(
+                getPreferKind = { MediaSourceKind.WEB },
+                getSourceTiers = { preferenceApi.sourceTiers!! },
+            )
+            val job = testScope().launch { handler.handleError(session, selector) }
+            testScope().runCurrent()
+
+            testScope().advanceTimeBy(999.milliseconds)
+            testScope().runCurrent()
+            assertFalse(job.isCompleted)
+            assertEquals(mediaA.mediaId, selector.selected.value?.mediaId)
+
+            testScope().advanceTimeBy(2.milliseconds)
+            testScope().runCurrent()
+
+            assertTrue(job.isCompleted)
+            assertEquals(mediaB.mediaId, selector.selected.value?.mediaId)
+        }
+
+    @Test
     fun `ERR-05 preferKind BT 不自动换源`() = runFetchMediaSelectorTestSuite {
         initSubject("test")
         val (_, session, sources) = configureFetchSession {
@@ -183,13 +229,14 @@ class PlayerLoadErrorHandlerTest {
             getPreferKind = { MediaSourceKind.BitTorrent },
             getSourceTiers = { preferenceApi.sourceTiers!! },
         )
-        val job = testScope().launch { handler.handleError(session, selector) }
+        val job = testScope().async { handler.handleError(session, selector) }
         testScope().advanceUntilIdle()
 
         // PINNED: ERR-05 preferKind=BT 无自动换源, 但当前 media 仍在 delay 前被拉黑
         assertTrue(job.isCompleted)
         assertEquals(mediaA.mediaId, selector.selected.value?.mediaId)
         assertEquals(setOf(mediaA.mediaId), handler.blacklist)
+        assertEquals(PlayerLoadErrorHandling.SkippedPreferKind(MediaSourceKind.BitTorrent), job.await())
     }
 
     @Test
@@ -378,6 +425,21 @@ class PlayerLoadErrorHandlerTest {
         assertTrue(job.isCompleted)
         assertEquals(replacement.mediaId, selector.selected.value?.mediaId)
         assertEquals(setOf(failed.mediaId), handler.blacklist)
+    }
+
+    @Test
+    fun `web engine unavailable is not recoverable by switching media`() {
+        // 网页引擎不可用时换任何网页资源都会同样失败, 不应触发自动换源
+        assertFalse(PlayerLoadErrorHandler.canRecoverBySwitching(VideoLoadingState.WebEngineUnavailable))
+    }
+
+    @Test
+    fun `resource level failures are recoverable by switching media`() {
+        assertTrue(PlayerLoadErrorHandler.canRecoverBySwitching(VideoLoadingState.NoMatchingFile))
+        assertTrue(PlayerLoadErrorHandler.canRecoverBySwitching(VideoLoadingState.ResolutionTimedOut))
+        assertTrue(PlayerLoadErrorHandler.canRecoverBySwitching(VideoLoadingState.NetworkError))
+        assertTrue(PlayerLoadErrorHandler.canRecoverBySwitching(VideoLoadingState.UnsupportedMedia))
+        assertTrue(PlayerLoadErrorHandler.canRecoverBySwitching(VideoLoadingState.UnknownError(IllegalStateException())))
     }
 
     context(scope: TestScope)

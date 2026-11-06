@@ -34,6 +34,11 @@ interface MediaResolver {
     fun supports(media: Media): Boolean
 
     /**
+     * 实际负责解析 [media] 的解析器: 对单个解析器是它自己 (若支持), 对组合解析器是链中第一个支持的. 都不支持时为 `null`.
+     */
+    fun resolverFor(media: Media): MediaResolver? = if (supports(media)) this else null
+
+    /**
      * "挂载" 到 composable 中, 以便进行需要虚拟 UI 的操作, 例如 WebView
      */
     @Composable
@@ -101,6 +106,12 @@ enum class ResolutionFailures {
     NO_MATCHING_RESOURCE,
 
     /**
+     * 负责加载网页的引擎 (桌面端 JCEF) 未初始化或已不可用.
+     * 与 [NO_MATCHING_RESOURCE] 区分: 此时换任何网页资源都会同样失败.
+     */
+    WEB_ENGINE_UNAVAILABLE,
+
+    /**
      * 引擎自身错误 (bug)
      */
     ENGINE_ERROR,
@@ -126,6 +137,10 @@ private class ChainedMediaResolver(
         return resolvers.any { it.supports(media) }
     }
 
+    override fun resolverFor(media: Media): MediaResolver? {
+        return resolvers.firstNotNullOfOrNull { it.resolverFor(media) }
+    }
+
     @Composable
     override fun ComposeContent() {
         this.resolvers.forEach {
@@ -134,7 +149,7 @@ private class ChainedMediaResolver(
     }
 
     override suspend fun resolve(media: Media, episode: EpisodeMetadata): MediaDataProvider<*> {
-        return resolvers.firstOrNull { it.supports(media) }?.resolve(media, episode)
+        return resolverFor(media)?.resolve(media, episode)
             ?: throw UnsupportedMediaException(media)
     }
 }

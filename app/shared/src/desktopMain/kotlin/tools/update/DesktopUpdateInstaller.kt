@@ -18,12 +18,16 @@ import me.him188.ani.app.platform.ExecutableDirectoryDetector
 import me.him188.ani.app.platform.features.DesktopFileRevealer
 import me.him188.ani.utils.io.SystemPath
 import me.him188.ani.utils.io.absolutePath
+import me.him188.ani.utils.io.inSystem
 import me.him188.ani.utils.io.toFile
+import me.him188.ani.utils.io.toKtPath
+import me.him188.ani.utils.ktor.ScopedHttpClient
 import me.him188.ani.utils.logging.error
 import me.him188.ani.utils.logging.info
 import me.him188.ani.utils.logging.logger
 import me.him188.ani.utils.platform.Platform
 import java.io.File
+import java.nio.file.Files
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 import kotlin.coroutines.cancellation.CancellationException
@@ -31,6 +35,15 @@ import kotlin.io.path.createTempDirectory
 import kotlin.system.exitProcess
 
 interface DesktopUpdateInstaller : UpdateInstaller {
+    /**
+     * 增量下载拼出解压好的目录; 回退的整包 zip 下载完也由 [prepareForInstallation] 解压. 两种情况下用户点「重启更新」时
+     * 安装器都只剩把目录换进安装目录.
+     */
+    override fun createPackageDownloader(client: ScopedHttpClient): FileDownloader =
+        createDeltaPackageAssembler(client)?.let {
+            DeltaPackageDownloader(it, DefaultFileDownloader(client), prepare = ::prepareForInstallation)
+        } ?: DefaultFileDownloader(client)
+
     override suspend fun openForManualInstallation(file: SystemPath, context: ContextMP): Boolean {
         return DesktopFileRevealer.revealFile(file)
     }
@@ -53,6 +66,68 @@ object MacOSUpdateInstaller : DesktopUpdateInstaller {
 
     override val installablePackageExtensions: Set<String> = setOf("dmg", "zip")
 
+    /**
+     * 版本 API 对 macOS 返回 dmg, 应用内更新改用同一发布里的 zip: 增量下载要按偏移从发布包取 entry, dmg 做不到;
+     * 整包回退时 zip 也不用经过 hdiutil 转换挂载. dmg 只用于首次安装.
+     */
+    override fun getUpdatePreparationUrls(packageUrls: List<String>): List<String> =
+        packageUrls.map { it.replace(DMG_SUFFIX, ".zip") }
+
+    /**
+     * 拼出的目录下就是新版本的 `.app`, 安装脚本把它移到当前 `.app` 旁边再交换, 不用解压和复制. 拼好随即校验签名,
+     * 安装脚本对这样的目录不再校验, 用户点「重启更新」后几乎不用等.
+     */
+    override fun createDeltaPackageAssembler(client: ScopedHttpClient): DeltaPackageAssembler? {
+        // 开发运行时不在 .app 里, 没有可复用的安装目录.
+        val appDir = currentAppBundle() ?: return null
+        return SignatureVerifyingAssembler(
+            DesktopDeltaPackageAssembler(client, installRoot = appDir, output = PackageOutput.Directory(stripTopLevel = false)),
+        )
+    }
+
+    /**
+     * 整包下载或拖拽安装的 zip 在这里解压并校验签名, 得到与增量拼包相同形态的目录. dmg 仍由安装脚本挂载.
+     */
+    override suspend fun prepareForInstallation(file: SystemPath): SystemPath {
+        val packageFile = file.toFile()
+        if (packageFile.isDirectory || packageFile.extension.lowercase() != "zip") return file
+        // 开发运行时不知道 .app 叫什么, 反正也装不上.
+        val appName = currentAppBundle()?.name ?: return file
+        return DesktopPackagePreparation.prepareMacPackage(packageFile, appName).toKtPath().inSystem
+    }
+
+    /**
+     * 当前运行的 `.app`; 开发运行时不在 `.app` 里, 返回 `null`.
+     */
+    private fun currentAppBundle(): File? =
+        ExecutableDirectoryDetector.INSTANCE.getExecutableDirectory().parentFile
+            ?.takeIf { it.name.endsWith(".app", ignoreCase = true) }
+
+    /**
+     * 拼好的目录里的 `.app` 立刻校验签名. 签名不对说明发布包本身有问题, 抛 [PackagePreparationException] 让下载直接失败,
+     * 而不是回退整包下载再失败一次.
+     */
+    private class SignatureVerifyingAssembler(private val delegate: DeltaPackageAssembler) : DeltaPackageAssembler {
+        override suspend fun assemble(
+            packageName: String,
+            manifestUrl: String,
+            packageUrl: suspend () -> String,
+            saveDir: SystemPath,
+            onProgress: (DeltaPackageProgress) -> Unit,
+        ): SystemPath {
+            val staging = delegate.assemble(packageName, manifestUrl, packageUrl, saveDir, onProgress)
+            val app = staging.toFile().listFiles()
+                ?.singleOrNull { it.isDirectory && it.name.endsWith(".app", ignoreCase = true) }
+                ?: throw PackagePreparationException("No .app found in the assembled package $packageName")
+            DesktopPackagePreparation.verifyMacAppSignature(app)
+            return staging
+        }
+    }
+
+    /**
+     * [file] 是解压好并校验过签名的目录 (增量拼包或 [prepareForInstallation] 的结果, 里面是 `.app`), 或 zip / dmg
+     * (拖拽安装). 安装脚本三种都能装.
+     */
     override fun install(file: SystemPath, context: ContextMP): InstallationResult {
         logger.info { "Preparing to install update for macOS using external script." }
 
@@ -72,202 +147,50 @@ object MacOSUpdateInstaller : DesktopUpdateInstaller {
         }
 
         val updateFile = file.toFile()
-        if (!updateFile.exists()) {
-            return failed("Update file does not exist: ${updateFile.absolutePath}")
+        if (updateFile.isDirectory) {
+            if (!updateFile.resolve(appDir.name).isDirectory) {
+                return failed("Prepared update directory does not contain ${appDir.name}: ${updateFile.absolutePath}")
+            }
+        } else {
+            if (!updateFile.exists()) {
+                return failed("Update file does not exist: ${updateFile.absolutePath}")
+            }
+
+            val extension = updateFile.extension.lowercase()
+            if (extension !in installablePackageExtensions) {
+                return failed("Unsupported update file format: $extension")
+            }
         }
 
-        val extension = updateFile.extension.lowercase()
-        if (extension !in installablePackageExtensions) {
-            return failed("Unsupported update file format: $extension")
+        // 新版本先放到 .app 旁边, 再以重命名替换整个 .app, 因此需要能写入它所在的目录.
+        if (!appDir.parentFile.canWrite()) {
+            return failed(
+                "Cannot write to the directory containing the app: ${appDir.parentFile}",
+                InstallationFailureReason.FAILED_TO_COPY,
+            )
         }
 
         val tempDir = createTempDirectory(prefix = "ani-macos-update-").toFile()
         logger.info { "tempDir: ${tempDir.absolutePath}" }
 
         val scriptFile = File(tempDir, "macos-update.command")
-        // We'll pass in essential parameters to the script.
-        val oldPid = ProcessHandle.current().pid()
-        val appName = appDir.name  // e.g. Ani.app
-        val targetParentDir = appDir.parentFile.absolutePath
-
-        // Generate the shell script content based on the extension
-        val scriptContent = when (extension) {
-            "dmg" -> {
-                logger.info { "tempMountDir: ${tempDir.absolutePath}" }
-
-                generateShellScriptForDmg(
-                    oldPid = oldPid,
-                    dmgFilePath = updateFile.absolutePath,
-                    convertedDmgFilePath = tempDir.resolve("converted.dmg").absolutePath,
-                    mountPath = tempDir.resolve("mount").absolutePath,
-                    appName = appName,
-                    targetParent = targetParentDir,
-                )
-            }
-
-            "zip" -> generateShellScriptForZip(
-                oldPid = oldPid,
-                zipFilePath = updateFile.absolutePath,
-                unzipPath = tempDir.resolve("unzip").absolutePath,
-                appName = appName,
-                targetParent = targetParentDir,
-            )
-
-            else -> return failed("Unsupported file format: $extension") // theoretically unreachable
-        }
-
-        // Write the script to disk and make it executable
-        scriptFile.writeText(scriptContent)
+        scriptFile.writeText(MACOS_UPDATE_SCRIPT)
         scriptFile.setExecutable(true)
 
-        // Now run the script
         logger.info { "Launching update script: ${scriptFile.absolutePath}" }
-        ProcessBuilder(scriptFile.absolutePath)
+        ProcessBuilder(
+            scriptFile.absolutePath,
+            ProcessHandle.current().pid().toString(),
+            updateFile.absolutePath,
+            appDir.absolutePath,
+            tempDir.absolutePath,
+        )
             .redirectOutput(File(tempDir, "update-output.log"))
             .redirectError(File(tempDir, "update-error.log"))
             .start()
 
         logger.info { "Exiting old instance." }
         return exitProcessForUpdate(delayMillis = 1000)
-    }
-
-    /**
-     * Generates a shell script that handles .dmg files:
-     * 1) Waits for the old process to exit
-     * 2) Converts + mounts the DMG
-     * 3) Copies the .app into place
-     * 4) Removes the quarantine attribute
-     * 5) Detaches the DMG
-     * 6) Cleans up
-     * 7) Launches the new app
-     */
-    private fun generateShellScriptForDmg(
-        oldPid: Long,
-        dmgFilePath: String,
-        convertedDmgFilePath: String,
-        mountPath: String,
-        appName: String,
-        targetParent: String,
-    ): String {
-        return $$"""
-            #!/usr/bin/env bash
-            set -euo pipefail
-
-            OLD_PID=$$oldPid
-            DMG_FILE="$$dmgFilePath"
-            MOUNT_DIR="$$mountPath"
-            APP_NAME="$$appName"
-            TARGET_PARENT="$$targetParent"
-            NEW_DMG_FILE="$$convertedDmgFilePath"
-
-            echo "Update script for DMG started."
-            echo "Will wait for process PID=$$oldPid to exit."
-
-            # 1) Wait for the old process to fully exit.
-            while kill -0 "$OLD_PID" 2>/dev/null; do
-              echo "Waiting for old app process $OLD_PID to exit..."
-              sleep 1
-            done
-
-            # 2) Convert the DMG to a CDR (UDTO format)
-            echo "Converting DMG into CDR..."
-            hdiutil convert "$DMG_FILE" -format UDTO -o "$NEW_DMG_FILE"
-
-            # 3) Mount the converted DMG
-            echo "Mounting the DMG at $MOUNT_DIR ..."
-            hdiutil attach "${NEW_DMG_FILE}.cdr" -nobrowse -noverify -noautoopen -mountpoint "$MOUNT_DIR"
-
-            # 4) Copy the updated .app from the DMG to the parent of the current .app
-            echo "Copying updated app to $TARGET_PARENT ..."
-            cp -R "$MOUNT_DIR/$APP_NAME" "$TARGET_PARENT"
-
-            # 5) Detach the DMG
-            echo "Detaching the DMG..."
-            hdiutil detach "$MOUNT_DIR" || echo "Warning: failed to detach DMG."
-
-            # 6) Remove the com.apple.quarantine attribute
-            echo "Removing quarantine..."
-            xattr -r -d com.apple.quarantine "$TARGET_PARENT/$APP_NAME" || true
-
-            echo "Cleaning up temporary mount directory..."
-            rm -rf "$MOUNT_DIR"
-
-            # 7) Launch the newly copied app
-            echo "Launching updated app: $TARGET_PARENT/$APP_NAME"
-            open "$TARGET_PARENT/$APP_NAME"
-
-            echo "Update script for DMG finished."
-        """.trimIndent()
-    }
-
-    /**
-     * Generates a shell script that handles .zip files:
-     * 1) Waits for the old process to exit
-     * 2) Unzips to a temp directory
-     * 3) Finds the .app inside the unzipped folder
-     * 4) Copies the .app into place
-     * 5) Removes the quarantine attribute
-     * 6) Cleans up
-     * 7) Launches the new app
-     */
-    private fun generateShellScriptForZip(
-        oldPid: Long,
-        zipFilePath: String,
-        unzipPath: String,
-        appName: String,
-        targetParent: String,
-    ): String {
-        return $$"""
-            #!/usr/bin/env bash
-            set -euo pipefail
-
-            OLD_PID=$$oldPid
-            ZIP_FILE="$$zipFilePath"
-            UNZIP_DIR="$$unzipPath"
-            APP_NAME="$$appName"
-            TARGET_PARENT="$$targetParent"
-
-            echo "Update script for ZIP started."
-            echo "Will wait for process PID=$$oldPid to exit."
-
-            # 1) Wait for the old process to fully exit.
-            while kill -0 "$OLD_PID" 2>/dev/null; do
-              echo "Waiting for old app process $OLD_PID to exit..."
-              sleep 1
-            done
-
-            # 2) Unzip the ZIP file into a temporary directory
-            echo "Unzipping update file into $UNZIP_DIR ..."
-            mkdir -p "$UNZIP_DIR"
-            unzip -q "$ZIP_FILE" -d "$UNZIP_DIR"
-
-            # 3) Within the unzipped folder, locate the .app folder
-            #    We'll assume the unzipped folder contains the correct .app we need, matching $APP_NAME
-            #    If the .zip file is structured differently, you'd adapt accordingly.
-            echo "Looking for $APP_NAME inside $UNZIP_DIR ..."
-            if [ ! -d "$UNZIP_DIR/$APP_NAME" ]; then
-              echo "Error: Could not find $APP_NAME in the extracted zip."
-              exit 1
-            fi
-
-            # 4) Copy the updated .app to the parent of the current .app
-            echo "Copying updated app to $TARGET_PARENT ..."
-            cp -R "$UNZIP_DIR/$APP_NAME" "$TARGET_PARENT"
-
-            # 5) Remove the com.apple.quarantine attribute
-            echo "Removing quarantine..."
-            xattr -r -d com.apple.quarantine "$TARGET_PARENT/$APP_NAME" || true
-
-            # 6) Clean up the unzipped folder
-            echo "Cleaning up temporary unzip directory..."
-            rm -rf "$UNZIP_DIR"
-
-            # 7) Launch the newly copied app
-            echo "Launching updated app: $TARGET_PARENT/$APP_NAME"
-            open "$TARGET_PARENT/$APP_NAME"
-
-            echo "Update script for ZIP finished."
-        """.trimIndent()
     }
 
     override fun deleteOldUpdater() {
@@ -282,6 +205,123 @@ object MacOSUpdateInstaller : DesktopUpdateInstaller {
         return InstallationResult.Failed(reason ?: InstallationFailureReason.UNSUPPORTED_FILE_STRUCTURE, message)
     }
 }
+
+/**
+ * 等待旧进程退出后, 用安装包中的 `.app` 替换当前 `.app` 并启动它.
+ *
+ * 参数: 旧进程 PID, 安装包路径, 当前 `.app` 路径, 工作目录.
+ *
+ * 安装包是应用在下载阶段解压好并校验过签名的目录 (里面是 `.app`) 时, 直接把 `.app` 移到当前 `.app` 旁边, 同一卷上只是
+ * 重命名, 用户点「重启更新」后几乎不用等; 是 `.zip` 或 `.dmg` 时在这里解压或挂载, 复制到旁边并校验签名.
+ * 之后以重命名替换整个 `.app`. 不能把新文件覆盖到现有 `.app` 中: 原地覆盖已签名的可执行文件会保留原 inode,
+ * 内核仍按旧签名校验它, 新版本启动时会因 "Code Signature Invalid" 被杀死; 覆盖也会留下旧版本独有的文件, 破坏签名封印.
+ * 先启动新版本再删旧 `.app`, 删除不算在用户的等待里. 任一步骤失败时保留或恢复旧 `.app`, 并重新启动它.
+ */
+internal val MACOS_UPDATE_SCRIPT = $$"""
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    OLD_PID="$1"
+    PACKAGE_FILE="$2"
+    TARGET_APP="$3"
+    WORK_DIR="$4"
+
+    APP_NAME="$(basename "$TARGET_APP")"
+    TARGET_PARENT="$(dirname "$TARGET_APP")"
+    # Kept next to the target so that the swaps below are renames within one volume.
+    STAGING_APP="$TARGET_PARENT/.$APP_NAME.update"
+    BACKUP_APP="$TARGET_PARENT/.$APP_NAME.old"
+    MOUNT_DIR="$WORK_DIR/mount"
+    MOUNTED=0
+
+    cleanup() {
+      local status=$?
+      if [ "$MOUNTED" = 1 ]; then
+        hdiutil detach "$MOUNT_DIR" >/dev/null || echo "Warning: failed to detach DMG." >&2
+      fi
+      # Logs in WORK_DIR are kept for troubleshooting.
+      rm -rf -- "$STAGING_APP" "$WORK_DIR/converted.cdr" "$WORK_DIR/unzip"
+      if [ "$status" -ne 0 ]; then
+        if [ ! -e "$TARGET_APP" ] && [ -e "$BACKUP_APP" ]; then
+          mv -- "$BACKUP_APP" "$TARGET_APP" || true
+        fi
+        echo "Update failed with status $status, launching the current app." >&2
+        open "$TARGET_APP" || true
+      fi
+    }
+    trap cleanup EXIT
+
+    echo "Waiting for process $OLD_PID to exit..."
+    while kill -0 "$OLD_PID" 2>/dev/null; do
+      sleep 1
+    done
+
+    # PREPARED=1: the app already unpacked the package and verified its code signature while downloading.
+    PREPARED=0
+    shopt -s nocasematch
+    if [ -d "$PACKAGE_FILE" ]; then
+      SOURCE_DIR="$PACKAGE_FILE"
+      PREPARED=1
+    else
+      case "$PACKAGE_FILE" in
+        *.dmg)
+          # A DMG with a license agreement cannot be attached without user interaction; the CDR copy has none.
+          echo "Converting DMG into CDR..."
+          hdiutil convert "$PACKAGE_FILE" -format UDTO -o "$WORK_DIR/converted"
+          mkdir -p "$MOUNT_DIR"
+          echo "Mounting DMG at $MOUNT_DIR..."
+          hdiutil attach "$WORK_DIR/converted.cdr" -nobrowse -noverify -noautoopen -readonly -mountpoint "$MOUNT_DIR"
+          MOUNTED=1
+          SOURCE_DIR="$MOUNT_DIR"
+          ;;
+        *.zip)
+          echo "Unzipping update package..."
+          mkdir -p "$WORK_DIR/unzip"
+          unzip -q "$PACKAGE_FILE" -d "$WORK_DIR/unzip"
+          SOURCE_DIR="$WORK_DIR/unzip"
+          ;;
+        *)
+          echo "Error: unsupported update package: $PACKAGE_FILE" >&2
+          exit 1
+          ;;
+      esac
+    fi
+    shopt -u nocasematch
+
+    SOURCE_APP="$SOURCE_DIR/$APP_NAME"
+    if [ ! -d "$SOURCE_APP" ]; then
+      echo "Error: $APP_NAME not found in the update package." >&2
+      exit 1
+    fi
+
+    rm -rf -- "$STAGING_APP" "$BACKUP_APP"
+    if [ "$PREPARED" = 1 ]; then
+      # A rename when the download directory is on the same volume; mv falls back to copying otherwise.
+      echo "Moving $SOURCE_APP to $STAGING_APP..."
+      mv -- "$SOURCE_APP" "$STAGING_APP"
+      rmdir -- "$SOURCE_DIR" 2>/dev/null || true
+      xattr -r -d com.apple.quarantine "$STAGING_APP" 2>/dev/null || true
+      if [ ! -x "$STAGING_APP/Contents/MacOS/${APP_NAME%.app}" ]; then
+        echo "Error: the prepared $APP_NAME has no executable launcher." >&2
+        exit 1
+      fi
+    else
+      echo "Copying $SOURCE_APP to $STAGING_APP..."
+      ditto "$SOURCE_APP" "$STAGING_APP"
+      xattr -r -d com.apple.quarantine "$STAGING_APP" 2>/dev/null || true
+
+      echo "Verifying code signature..."
+      codesign --verify --deep --strict "$STAGING_APP"
+    fi
+
+    echo "Replacing $TARGET_APP..."
+    mv -- "$TARGET_APP" "$BACKUP_APP"
+    mv -- "$STAGING_APP" "$TARGET_APP"
+
+    echo "Launching $TARGET_APP"
+    open "$TARGET_APP"
+    rm -rf -- "$BACKUP_APP" || echo "Warning: failed to remove $BACKUP_APP." >&2
+""".trimIndent()
 
 /**
  * 在后台线程退出进程, 让外部更新程序接管.
@@ -417,6 +457,8 @@ object LinuxUpdateInstaller : DesktopUpdateInstaller {
 
 internal const val LINUX_APPIMAGE_UPDATE_TOOL = "appimageupdatetool-x86_64.AppImage"
 
+private val DMG_SUFFIX = Regex("\\.dmg$", RegexOption.IGNORE_CASE)
+
 /**
  * 版本 API 返回的是各平台通用的完整安装包地址. Linux Release 将 zsync 元数据作为同名 AppImage 的
  * `.zsync` 伴随资源发布, 因此只在 Linux 安装准备阶段派生该地址, 而不向版本 API 引入平台专用字段.
@@ -468,12 +510,39 @@ object WindowsUpdateInstaller : DesktopUpdateInstaller {
 
     override val installablePackageExtensions: Set<String> = setOf("zip")
 
+    /**
+     * 增量下载直接拼出解压好的目录, 更新器把它整个换进安装目录, 省掉写 zip 再解压.
+     */
+    override fun createDeltaPackageAssembler(client: ScopedHttpClient): DeltaPackageAssembler? {
+        val appDir = ExecutableDirectoryDetector.INSTANCE.getExecutableDirectory()
+        if (!appDir.resolve(APP_EXECUTABLE).exists()) {
+            // 开发运行时不是安装目录, 没有可复用的文件.
+            return null
+        }
+        return DesktopDeltaPackageAssembler(client, installRoot = appDir, output = PackageOutput.Directory(stripTopLevel = true))
+    }
+
+    /**
+     * 整包下载或拖拽安装的 zip 在这里解压成与增量拼包相同形态的目录, 更新器就不用在用户等待时解压.
+     */
+    override suspend fun prepareForInstallation(file: SystemPath): SystemPath {
+        val packageFile = file.toFile()
+        if (packageFile.isDirectory || packageFile.extension.lowercase() != "zip") return file
+        return DesktopPackagePreparation.prepareWindowsPackage(packageFile, APP_EXECUTABLE).toKtPath().inSystem
+    }
+
+    /**
+     * [file] 是解压好的新版本目录 (增量拼包或 [prepareForInstallation] 的结果). 更新器 `tools/ani-update` 也能装整包 zip,
+     * 应用里的流程已经不再把 zip 交给它. 更新器等本进程退出后把新版本换进安装目录, 再启动新版本.
+     *
+     * 更新器复制到临时目录运行而不是安装目录: 它要重命名安装目录, 自己不能在里面.
+     */
     override fun install(file: SystemPath, context: ContextMP): InstallationResult {
         logger.info { "Installing update for Windows" }
         val appDir = ExecutableDirectoryDetector.INSTANCE.getExecutableDirectory()
         logger.info { "Current app dir: ${appDir.absolutePath}" }
-        if (!appDir.resolve("Ani.exe").exists()) {
-            logger.info { "Current app dir does not have 'Ani.exe'. Fallback to manual update" }
+        if (!appDir.resolve(APP_EXECUTABLE).exists()) {
+            logger.info { "Current app dir does not have '$APP_EXECUTABLE'. Fallback to manual update" }
             return InstallationResult.Failed(InstallationFailureReason.UNSUPPORTED_FILE_STRUCTURE)
         }
 
@@ -481,32 +550,62 @@ object WindowsUpdateInstaller : DesktopUpdateInstaller {
             System.getProperty("compose.application.resources.dir")
                 ?: throw IllegalStateException("Cannot get resources directory"),
         )
-        val updateExecutable = resourcesDir.resolve("ani_update.exe")
+        val updateExecutable = resourcesDir.resolve(UPDATER_EXECUTABLE)
         if (!updateExecutable.exists()) {
-            logger.info { "'ani_update.exe' not found. Fallback to manual update" }
+            logger.info { "'$UPDATER_EXECUTABLE' not found. Fallback to manual update" }
             return InstallationResult.Failed(InstallationFailureReason.UNSUPPORTED_FILE_STRUCTURE)
         }
 
-        // Copy ani_update.exe to current dir
-        val copiedUpdateExecutable = appDir.resolve("ani_update.exe")
-        updateExecutable.copyTo(copiedUpdateExecutable, true)
+        val updaterDir = Files.createTempDirectory(UPDATER_TEMP_DIR_PREFIX).toFile()
+        val updater = updaterDir.resolve(UPDATER_EXECUTABLE)
+        updateExecutable.copyTo(updater, overwrite = true)
 
-        ProcessBuilder(
-            "cmd", "/c", "start", "cmd", "/c",
-            "\"", copiedUpdateExecutable.absolutePath, file.absolutePath, appDir.absolutePath, "\"",
+        val command = updaterCommand(
+            updater = updater,
+            appDir = appDir,
+            source = file.toFile(),
+            pid = ProcessHandle.current().pid(),
         )
-            .directory(appDir)
+        logger.info { "Launching updater: $command" }
+        ProcessBuilder(command)
+            .directory(updaterDir)
             .start()
 
         logger.info { "Installer started" }
         return exitProcessForUpdate(delayMillis = 0)
     }
 
+    /**
+     * 启动更新器的命令行. 经 `cmd /c start` 启动, 更新器在自己的控制台窗口里运行并显示进度.
+     * [source] 是目录时按新版本目录安装, 否则按 zip 安装.
+     */
+    internal fun updaterCommand(updater: File, appDir: File, source: File, pid: Long): List<String> = listOf(
+        "cmd", "/c", "start", "",
+        updater.absolutePath,
+        "--pid", pid.toString(),
+        "--app-dir", appDir.absolutePath,
+        if (source.isDirectory) "--staging" else "--archive", source.absolutePath,
+    )
+
+    /**
+     * 启动时清理上次更新留下的东西: 旧版本放在安装目录里的更新器, 更新器交换目录失败时留下的 `<安装目录>.old*`,
+     * 以及临时目录里的更新器副本. 删不掉的 (比如更新器进程还没退出) 下次再删.
+     */
     override fun deleteOldUpdater() {
         val appDir = ExecutableDirectoryDetector.INSTANCE.getExecutableDirectory()
-        val updateExecutable = appDir.resolve("ani_update.exe")
-        if (updateExecutable.exists()) {
-            updateExecutable.delete()
-        }
+        appDir.resolve(UPDATER_EXECUTABLE).delete()
+        appDir.parentFile?.listFiles()
+            ?.filter { it.isDirectory && it.name.startsWith(appDir.name + ".old") }
+            ?.forEach { leftover ->
+                logger.info { "Deleting leftover of a previous update: $leftover" }
+                leftover.deleteRecursively()
+            }
+        File(System.getProperty("java.io.tmpdir")).listFiles()
+            ?.filter { it.isDirectory && it.name.startsWith(UPDATER_TEMP_DIR_PREFIX) }
+            ?.forEach { it.deleteRecursively() }
     }
+
+    private const val APP_EXECUTABLE = "Ani.exe"
+    private const val UPDATER_EXECUTABLE = "ani_update.exe"
+    private const val UPDATER_TEMP_DIR_PREFIX = "ani-update-"
 }

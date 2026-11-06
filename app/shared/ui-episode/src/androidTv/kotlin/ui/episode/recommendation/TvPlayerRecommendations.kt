@@ -49,6 +49,7 @@ import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
 import me.him188.ani.app.domain.episode.SubjectRecommendation
+import me.him188.ani.app.domain.episode.isAd
 import me.him188.ani.app.ui.foundation.AsyncImage
 import me.him188.ani.app.ui.lang.Lang
 import me.him188.ani.app.ui.lang.subject_episode_recommendations_empty
@@ -61,9 +62,9 @@ import me.him188.ani.tv.ui.foundation.focus.tvCardFocusBorder
 import me.him188.ani.tv.ui.foundation.widgets.tvOptionSurfaceColors
 import org.jetbrains.compose.resources.stringResource
 
-/** External/ad recommendations stay visible but have no navigation action on TV. */
+/** External/ad recommendations are filtered out. */
 internal val SubjectRecommendation.tvNavigationSubjectId: Int?
-    get() = subjectId?.takeIf { uri == null && it in 1..Int.MAX_VALUE.toLong() }?.toInt()
+    get() = subjectId?.takeIf { !isAd() && it in 1..Int.MAX_VALUE.toLong() }?.toInt()
 
 @Composable
 internal fun TvPlayerRecommendationsRow(
@@ -75,6 +76,7 @@ internal fun TvPlayerRecommendationsRow(
     onClick: (SubjectRecommendation) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val validRecommendations = remember(recommendations) { recommendations.filter { !it.isAd() } }
     Box(
         modifier
             .fillMaxSize()
@@ -104,7 +106,7 @@ internal fun TvPlayerRecommendationsRow(
                     vertical = 12.dp,
                 ),
             ) {
-                if (recommendations.isEmpty() && loading) {
+                if (validRecommendations.isEmpty() && loading) {
                     items(4, key = { "placeholder-$it" }) { index ->
                         TvRecommendationCardPlaceholder(
                             // Keep only the entry card focusable so Up/Back works while loading.
@@ -113,7 +115,7 @@ internal fun TvPlayerRecommendationsRow(
                                 .testTag(if (index == 0) "tv-recommendations-loading" else "tv-recommendation-placeholder-$index"),
                         )
                     }
-                } else if (recommendations.isEmpty()) item(key = "empty") {
+                } else if (validRecommendations.isEmpty()) item(key = "empty") {
                     Surface(
                         onClick = {},
                         modifier = entryModifier
@@ -129,7 +131,7 @@ internal fun TvPlayerRecommendationsRow(
                         }
                     }
                 }
-                itemsIndexed(recommendations, key = { _, item -> item.uniqueId }) { index, recommendation ->
+                itemsIndexed(validRecommendations, key = { _, item -> item.uniqueId }) { index, recommendation ->
                     RecommendationStripCard(
                         recommendation,
                         onClick = { if (recommendation.tvNavigationSubjectId != null) onClick(recommendation) },

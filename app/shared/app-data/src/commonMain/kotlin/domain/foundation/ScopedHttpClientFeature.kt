@@ -18,12 +18,14 @@ import io.ktor.client.plugins.HttpSend
 import io.ktor.client.plugins.ResponseException
 import io.ktor.client.plugins.SendCountExceedException
 import io.ktor.client.plugins.Sender
+import io.ktor.client.plugins.api.createClientPlugin
 import io.ktor.client.plugins.auth.Auth
 import io.ktor.client.plugins.auth.providers.BearerTokens
 import io.ktor.client.plugins.auth.providers.bearer
 import io.ktor.client.plugins.defaultRequest
 import io.ktor.client.plugins.plugin
 import io.ktor.client.request.HttpRequestBuilder
+import io.ktor.http.HttpStatusCode
 import io.ktor.http.URLBuilder
 import io.ktor.http.Url
 import io.ktor.util.appendIfNameAbsent
@@ -134,6 +136,10 @@ enum class ScopedHttpClientUserAgent {
 
 // endregion
 
+/**
+ * 用 [Auth] 插件给请求加上 bearer token. 收到 401 时由 [Auth] 调用 `onRefresh`, 拿到新 token 后重发一次.
+ * 其他失败的响应原样交给调用方: 上传图片、发评论等请求重发会被重复执行, 并消耗用户在服务器上的频率限制.
+ */
 abstract class AbstractBearerTokenHandler(
     key: ScopedHttpClientFeatureKey<Boolean>,
     private val bearerToken: Flow<String?>,
@@ -152,18 +158,6 @@ abstract class AbstractBearerTokenHandler(
                 refreshTokens {
                     onRefresh()
                 }
-            }
-        }
-    }
-
-    override fun applyToClient(client: HttpClient, value: Boolean) {
-        if (!value) return
-        client.plugin(HttpSend).intercept { request ->
-            val originalCall = execute(request)
-            if (originalCall.response.status.value !in 100..399) {
-                execute(request)
-            } else {
-                originalCall
             }
         }
     }
@@ -202,6 +196,44 @@ val DistributionChannelFeature = ScopedHttpClientFeatureKey<DistributionChannelP
 
 class DistributionChannelFeatureHandler(defaultProvider: () -> String) :
     AbstractDistributionChannelHandler(DistributionChannelFeature, defaultProvider)
+
+// endregion
+
+// region AniInstallIdFeature
+/**
+ * 在发往 Ani 服务器的请求上附加本机安装 ID ([AniInstallIdFeatureHandler.HEADER_INSTALL_ID]).
+ * 只应对访问 Ani 服务器的 client 启用.
+ */
+val AniInstallIdFeature = ScopedHttpClientFeatureKey<Boolean>("AniInstallId")
+
+/**
+ * 实现 [AniInstallIdFeature]. 只给 host 为 [ServerListFeatureConfig.MAGIC_ANI_SERVER_HOST] 的请求加 header,
+ * 即使启用了此特性的 client 被用来请求其他网站, 安装 ID 也不会发出去.
+ *
+ * @param installId 当前的安装 ID. 每个请求都会调用, 必须不阻塞; 返回 `null` 时不加 header.
+ */
+class AniInstallIdFeatureHandler(
+    private val installId: () -> String?,
+) : ScopedHttpClientFeatureHandler<Boolean>(AniInstallIdFeature) {
+    internal val plugin = createClientPlugin("AniInstallId") {
+        onRequest { request, _ ->
+            // ServerListFeature 在发送阶段才把 MAGIC_ANI_SERVER 替换成真实地址, 这里看到的还是 MAGIC host
+            if (!request.url.host.equals(ServerListFeatureConfig.MAGIC_ANI_SERVER_HOST, ignoreCase = true)) {
+                return@onRequest
+            }
+            val id = installId() ?: return@onRequest
+            request.headers.appendIfNameAbsent(HEADER_INSTALL_ID, id)
+        }
+    }
+
+    override fun applyToConfig(config: HttpClientConfig<*>, value: Boolean) {
+        if (value) config.install(plugin)
+    }
+
+    companion object {
+        const val HEADER_INSTALL_ID = "X-Ani-Install-Id"
+    }
+}
 
 // endregion
 
@@ -293,7 +325,8 @@ data class ServerListFeatureHandler(
                 logger.debug { "Trying alternative server $serverUrl for request ${request.url}" }
             }
             val thisCall = try {
-                execute(request) // if `expectSuccess` is true, this will throw on failure, otherwise return the call
+                // HttpCallValidator 在所有 HttpSend 拦截器的外层, 即使 expectSuccess 为 true, 4xx/5xx 在这里也是正常返回的响应
+                execute(request)
             } catch (e: CancellationException) {
                 throw e // don't prevent cancellation
             } catch (e: ClientRequestException) {
@@ -306,8 +339,11 @@ data class ServerListFeatureHandler(
             }
             lastCall = thisCall
 
-            if (thisCall.response.status.value in 100..399) {
-                // success: remember the index for next time
+            val status = thisCall.response.status
+            if (status.value in 100..399 || status in FINAL_ERROR_STATUSES ||
+                thisCall.response.headers.contains(ERROR_CODE_HEADER)
+            ) {
+                // the server is reachable: remember the index for next time
                 selectionState.value = SelectionState(signature, index)
                 return thisCall
             } else {
@@ -326,6 +362,26 @@ data class ServerListFeatureHandler(
     private val logger = logger<ServerListFeatureHandler>()
 
     internal companion object {
+        /**
+         * Ani 服务器按业务规则给出的错误: 冲突 (409)、请求内容不被接受 (422) 和请求过于频繁 (429). 收到时直接返回, 不换服务器.
+         *
+         * 所有服务器地址都通向同一个后端, 换一个地址只会得到同样的回答, 而上传图片、发评论等请求会被重复执行,
+         * 并消耗用户在服务器上的频率限制, 后面的请求因此被限流, 调用方就看不到第一次响应里的错误码.
+         *
+         * 其他 4xx 会换下一个服务器: 某个地址前面的代理或 CDN 可能用 400、403、404、413 等回应, 换一个地址就能正常处理.
+         */
+        internal val FINAL_ERROR_STATUSES = setOf(
+            HttpStatusCode.Conflict,
+            HttpStatusCode.UnprocessableEntity,
+            HttpStatusCode.TooManyRequests,
+        )
+
+        /**
+         * Ani 服务器在业务错误的响应上带的错误码. 带这个头的响应来自后端本身而不是某个地址前面的代理, 无论状态码是什么都直接返回,
+         * 例如图片处理服务暂时不可用时的 503.
+         */
+        internal const val ERROR_CODE_HEADER = "X-Ani-Error-Code"
+
         // for testing
         internal fun replaceUrl(urlBuilder: URLBuilder, newServerUrl: Url) {
             // Apply server URL to request

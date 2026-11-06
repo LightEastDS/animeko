@@ -26,6 +26,8 @@ import me.him188.ani.app.data.repository.media.MikanIndexes
 import me.him188.ani.app.data.repository.player.EpisodeHistories
 import me.him188.ani.app.data.repository.torrent.peer.PeerFilterSubscriptionsSaveData
 import me.him188.ani.app.data.repository.user.TokenSave
+import me.him188.ani.app.domain.featureflag.FeatureFlagSnapshot
+import me.him188.ani.app.domain.install.InstallInfo
 import me.him188.ani.app.domain.media.cache.storage.MediaCacheSave
 import me.him188.ani.utils.httpdownloader.DownloadState
 import me.him188.ani.utils.io.SystemPath
@@ -147,6 +149,28 @@ abstract class PlatformDataStoreManager {
             serializer = ManualBrowseMemories.serializer().asDataStoreSerializer({ ManualBrowseMemories.Empty }),
             produceFile = { resolveDataStoreFile("manualBrowseMemories") },
             corruptionHandler = ReplaceFileCorruptionHandler { ManualBrowseMemories.Empty },
+        )
+    }
+
+    /**
+     * For [me.him188.ani.app.domain.install.InstallReporter]. 不参与设置备份.
+     */
+    val installInfoStore by lazy {
+        DataStoreFactory.create(
+            serializer = InstallInfo.serializer().asDataStoreSerializer({ InstallInfo.Initial }),
+            produceFile = { resolveDataStoreFile("installInfo") },
+            corruptionHandler = ReplaceFileCorruptionHandler { InstallInfo.Initial },
+        )
+    }
+
+    /**
+     * 上次拉取到的功能开关, 供 [me.him188.ani.app.domain.featureflag.FeatureFlagManager] 在下次启动拉取完成前使用. 不参与设置备份.
+     */
+    val featureFlagStore by lazy {
+        DataStoreFactory.create(
+            serializer = FeatureFlagSnapshot.serializer().asDataStoreSerializer({ FeatureFlagSnapshot.Empty }),
+            produceFile = { resolveDataStoreFile("featureFlags") },
+            corruptionHandler = ReplaceFileCorruptionHandler { FeatureFlagSnapshot.Empty },
         )
     }
 

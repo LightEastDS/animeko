@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.update
 import me.him188.ani.app.platform.ContextMP
 import me.him188.ani.utils.io.SystemPath
 import me.him188.ani.utils.io.extension
+import me.him188.ani.utils.ktor.ScopedHttpClient
 import kotlin.coroutines.cancellation.CancellationException
 
 /**
@@ -46,6 +47,32 @@ interface UpdateInstaller {
      * 实际差分数据由外部更新器在安装阶段下载.
      */
     fun getUpdatePreparationUrls(packageUrls: List<String>): List<String> = packageUrls
+
+    /**
+     * 创建下载安装包用的 [FileDownloader].
+     *
+     * 默认整包下载. Windows 和 macOS 用 `DeltaPackageDownloader` 增量下载: 复用已安装目录里内容相同的文件,
+     * 只从发布包取有变化的部分, 在本地拼出与发布包等价的 zip 后仍走 [install].
+     */
+    fun createPackageDownloader(client: ScopedHttpClient): FileDownloader = DefaultFileDownloader(client)
+
+    /**
+     * 创建以当前安装目录为基础增量拼包的 [DeltaPackageAssembler], 拼出的包可交给 [install].
+     *
+     * 不支持时返回 `null`: Android 和 Linux 没有可整体替换的安装目录, 开发运行时也不在安装目录里.
+     */
+    fun createDeltaPackageAssembler(client: ScopedHttpClient): DeltaPackageAssembler? = null
+
+    /**
+     * 把下载好的安装包整理成 [install] 开销最小的形态, 返回整理好的包; 不需要整理的平台或包原样返回.
+     *
+     * 桌面端把 zip 解压成能直接换进安装目录的目录 (macOS 还校验签名), 这样用户点「重启更新」后只剩交换目录,
+     * 不用等解压和校验. 自动更新在下载阶段就调用它, [UpdateInstallationRunner] 安装前再调用一次, 已整理好的包原样返回.
+     *
+     * 安装包本身有问题 (里面没有应用、签名无效) 时抛 [PackagePreparationException], 换个下载源也不会好;
+     * 其他异常是环境问题 (磁盘满、工具缺失), 由调用方当作下载或安装失败.
+     */
+    suspend fun prepareForInstallation(file: SystemPath): SystemPath = file
 
     /**
      * 如果 [install] 可能返回 [InstallationResult.Failed], 则需实现
@@ -87,7 +114,9 @@ class UpdateInstallationRunner(
     ) {
         _state.value = UpdateInstallationState.Installing
         try {
-            _state.value = when (val result = installer.install(file, packageUrls, context)) {
+            // 自动更新下载时已经整理过, 这里原样返回; 拖拽安装的 zip 在这里解压.
+            val prepared = installer.prepareForInstallation(file)
+            _state.value = when (val result = installer.install(prepared, packageUrls, context)) {
                 InstallationResult.Succeed -> UpdateInstallationState.Succeed
                 is InstallationResult.Failed -> UpdateInstallationState.Failed(result)
             }
@@ -122,6 +151,12 @@ sealed class InstallationResult {
         val message: String? = null,
     ) : InstallationResult()
 }
+
+/**
+ * [UpdateInstaller.prepareForInstallation] 发现安装包本身不可用: 里面没有当前应用, 或签名校验不通过.
+ * 内容已经按清单或校验和核对过, 重新下载或换下载源都不会好, 调用方应直接报失败.
+ */
+class PackagePreparationException(message: String, cause: Throwable? = null) : Exception(message, cause)
 
 enum class InstallationFailureReason {
     /**

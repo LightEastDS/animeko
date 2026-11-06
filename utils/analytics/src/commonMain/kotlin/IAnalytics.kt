@@ -44,6 +44,7 @@ value class AnalyticsEvent(val event: String) {
     companion object {
         val Screen = AnalyticsEvent("screen")
         val AppStart = Screen // compatibility
+        val ScreenView = AnalyticsEvent("screen_view")
         val SessionStart = AnalyticsEvent("session_start")
 
         val AppServerTestSuccess = AnalyticsEvent("app_server_test_success")
@@ -58,6 +59,14 @@ value class AnalyticsEvent(val event: String) {
         val EpisodeEnter = AnalyticsEvent("episode_enter")
         val EpisodeSwitch = AnalyticsEvent("episode_switch")
         val EpisodePlaying = AnalyticsEvent("episode_playing")
+        val EpisodeExit = AnalyticsEvent("episode_exit")
+        val MediaFetchResult = AnalyticsEvent("media_fetch_result")
+
+        /**
+         * 播放页加载流程中的一步, 以 `step` 属性区分. 同一播放页的事件共享 `play_session_id`, 按 `seq` 排序即可重放.
+         * 见 `docs/contributing/code/analytics-play-flow.md`.
+         */
+        val PlayFlow = AnalyticsEvent("play_flow")
 
         val CacheCreate = AnalyticsEvent("cache_create")
 
@@ -78,6 +87,7 @@ value class AnalyticsEvent(val event: String) {
 data class AnalyticsConfig(
     val appVersion: String,
     val debugLogging: Boolean,
+    val distroChannel: String,
 ) {
     companion object
 }
@@ -93,6 +103,7 @@ abstract class CommonAnalyticsImpl(
         put("os", platform.name)
         put("arch", platform.arch.name)
         put("\$app_version", config.appVersion)
+        put("distro_channel", config.distroChannel)
     }
 
     final override fun recordEvent(event: AnalyticsEvent, properties: Map<String, Any?>) {

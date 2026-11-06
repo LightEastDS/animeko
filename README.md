@@ -1,10 +1,10 @@
 <div align="center">
 
-![Animeko](https://socialify.git.ci/open-ani/animeko/image?description=1&descriptionEditable=%E9%9B%86%E6%89%BE%E7%95%AA%E3%80%81%E8%BF%BD%E7%95%AA%E3%80%81%E7%9C%8B%E7%95%AA%E7%9A%84%E4%B8%80%E7%AB%99%E5%BC%8F%E5%BC%B9%E5%B9%95%E8%BF%BD%E7%95%AA%E5%B9%B3%E5%8F%B0&font=Jost&logo=https%3A%2F%2Fraw.githubusercontent.com%2Fopen-ani%2Fanimeko%2Frefs%2Fheads%2Fmain%2F.github%2Fassets%2Flogo.png&name=1&owner=1&pattern=Plus&theme=Light)
+![Animeko](https://socialify.git.ci/LightEastDS/animeko/image?description=1&descriptionEditable=%E9%9B%86%E6%89%BE%E7%95%AA%E3%80%81%E8%BF%BD%E7%95%AA%E3%80%81%E7%9C%8B%E7%95%AA%E7%9A%84%E4%B8%80%E7%AB%99%E5%BC%8F%E5%BC%B9%E5%B9%95%E8%BF%BD%E7%95%AA%E5%B9%B3%E5%8F%B0%EF%BC%88%E6%97%A0%E5%B9%BF%E5%91%8A%E7%BA%AF%E5%87%80%E7%89%88%EF%BC%89&font=Jost&logo=https%3A%2F%2Fraw.githubusercontent.com%2FLightEastDS%2Fanimeko%2Frefs%2Fheads%2Fmain%2F.github%2Fassets%2Flogo.png&name=1&owner=1&pattern=Plus&theme=Light)
 
-| 正式版                                                                                                                                                                          | 测试版                                                                                                                                                                                     | 讨论群                                                                                                                                                                                                                                                                                                                                                                                                           |
-|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| [![Stable](https://img.shields.io/github/release/open-ani/ani.svg?maxAge=3600&label=Stable&labelColor=06599d&color=043b69)](https://github.com/open-ani/ani/releases/latest) | [![Beta](https://img.shields.io/github/v/release/open-ani/ani.svg?maxAge=3600&label=Beta&labelColor=2c2c47&color=1c1c39&include_prereleases)](https://github.com/open-ani/ani/releases) | [![Group](https://img.shields.io/badge/Telegram-2CA5E0?style=flat-squeare&logo=telegram&logoColor=white)](https://t.me/openani) |
+| 最新版本 | 全部版本 |
+|---|---|
+| [![Release](https://img.shields.io/github/v/release/LightEastDS/animeko.svg?maxAge=3600&label=Release&labelColor=06599d&color=043b69&include_prereleases)](https://github.com/LightEastDS/animeko/releases/latest) | [![Releases](https://img.shields.io/badge/GitHub-Releases-2c2c47?logo=github&logoColor=white)](https://github.com/LightEastDS/animeko/releases) |
 
 </div>
 
@@ -34,9 +34,29 @@ Animeko 支持云同步观看记录 ([Bangumi][Bangumi])、多视频数据源、
 
 > Animeko 曾用名 Ani，现在也简称 Ani。
 
-[立即下载](https://animeko.org/)
+[立即下载 (GitHub Releases)](https://github.com/LightEastDS/animeko/releases)
 
 https://github.com/user-attachments/assets/e63636c9-30b7-411c-aa6b-e5b78b900726
+
+## 🌟 本分支修改说明（无广告纯净版）
+
+本仓库为 Animeko 的去广告纯净定制分支（由 [LightEastDS](https://github.com/LightEastDS/animeko) 维护），主要包含以下定制改动：
+
+1. **彻底移除推广与外部广告**
+   - 过滤并移除推荐流、剧集播放详情页及 TV 端推荐栏中的所有外部推广链接与广告条目。
+2. **移除广告追踪权限**
+   - 从 Android Manifest 中移除 `com.google.android.gms.permission.AD_ID` 谷歌广告 ID 追踪权限。
+3. **默认开启免广告特权认证**
+   - 客户端默认启用开发者与杰出贡献者免广告认证状态。
+4. **独立签名与架构打包**
+   - 采用自定义独立 Release 密钥库签名，针对主流 Android `arm64-v8a` 架构打包构建。
+
+## 🚀 下载安装
+
+请前往本仓库的 GitHub Releases 页面下载最新构建的 `arm64-v8a` 无广告纯净版安装包：
+
+- 🔗 **[前往 GitHub Releases 下载最新版本](https://github.com/LightEastDS/animeko/releases)**
+- 推荐下载：`Animeko-<版本号>-arm64-v8a.apk`（适用于绝大多数现代 64 位 Android 手机与平板设备）
 
 ## 主要功能
 
@@ -64,7 +84,7 @@ https://github.com/user-attachments/assets/e63636c9-30b7-411c-aa6b-e5b78b900726
 
 - [聚合视频数据源](https://github.com/creamycake-anime/ani-subs)，全自动选择
   > 还支持 BitTorrent、Jellyfin、Emby、以及自定义源
-- 聚合全网弹幕源（[弹弹play][ddplay]），以及 Animeko 自己的[弹幕服务](https://danmaku-cn.myani.org/swagger/index.html)
+- 聚合全网弹幕源（[弹弹play][ddplay]）以及公益弹幕服务
 
 | <img src=".readme/images/features/mediaselector-simple.png" alt="" width="200"/> | <img src=".readme/images/features/mediaselector-detailed.png" alt="" width="200"/> |
 |:--------------------------------------------------------------------------------:|:----------------------------------------------------------------------------------:|
@@ -103,36 +123,28 @@ https://github.com/user-attachments/assets/e63636c9-30b7-411c-aa6b-e5b78b900726
 | <img src=".readme/images/features/theme-settings.png" alt="" width="200"/> | <img src=".readme/images/features/media-preferences.png" alt="" width="200"/> |
 |:--------------------------------------------------------------------------:|:-----------------------------------------------------------------------------:|
 
-## 下载
-
-Animeko 支持所有主流平台：Android、iOS、Windows、macOS、Linux。
-
-- 稳定版本: 功能稳定  
-  [下载稳定版本](https://animeko.org/downloads/)
-
-通常建议使用稳定版本. 如果你愿意参与测试并拥有一定的对 bug 的处理能力, 也欢迎使用测试版本更快体验新功能.
-具体版本类型可查看下方.
-
-- 测试版本: 体验最新功能  
-  [下载测试版本](https://animeko.org/downloads/)
-
 ## 技术总览
 
-如果你是开发者，我们总是欢迎你提交 PR 参与开发！
-以下几点可以给你一个技术上的大概了解。
+以下几点可以给你一个技术上的大概了解：
 
 - [Kotlin 多平台][Kotlin Multiplatform]架构；
-- 使用新一代响应式 UI 框架 [Compose Multiplatform][Compose Multiplatform] 构建
-  UI；
-- 内置专为 Animeko 打造的“基于 [libtorrent][libtorrent] 的 BitTorrent 引擎，优化边下边播的体验；
+- 使用新一代响应式 UI 框架 [Compose Multiplatform][Compose Multiplatform] 构建 UI；
+- 内置专为 Animeko 打造的基于 [libtorrent][libtorrent] 的 BitTorrent 引擎，优化边下边播的体验；
 - 高性能弹幕引擎，公益弹幕服务器 + 网络弹幕源；
-- 适配多平台的[视频播放器](https://github.com/open-ani/mediamp)，Android 底层为 [ExoPlayer][ExoPlayer]，PC 底层为 [VLC][VLC]；
+- 适配多平台的视频播放器，Android 底层为 [ExoPlayer][ExoPlayer]，PC 底层为 [VLC][VLC]；
 - 多类型数据源适配，内置 [动漫花园][dmhy]、[Mikan]，拥有强大的自定义数据源编辑器和自动数据源选择器。
 
-### 参与开发
+### 构建与开发
 
-欢迎你提交 PR 参与开发，
-有关项目技术细节请参考 [CONTRIBUTING](docs/contributing/README.md)。
+1. 克隆本仓库：
+   ```bash
+   git clone https://github.com/LightEastDS/animeko.git
+   ```
+2. 构建 Android `arm64-v8a` Release APK：
+   ```bash
+   ./gradlew :app:android:assembleDefaultRelease
+   ```
+   有关项目技术细节请参考 [CONTRIBUTING](docs/contributing/README.md)。
 
 ## FAQ
 

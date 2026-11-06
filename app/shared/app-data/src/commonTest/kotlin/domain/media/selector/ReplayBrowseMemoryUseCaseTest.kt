@@ -40,6 +40,7 @@ import me.him188.ani.datasources.api.topic.ResourceLocation
 import me.him188.ani.datasources.api.topic.SubtitleLanguage
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertSame
@@ -151,18 +152,19 @@ class ReplayBrowseMemoryUseCaseTest {
             result = fixture.useCase(SUBJECT_ID, episodeInfo(4), selector)
         }
 
-        assertEquals(ReplayResult.SELECTED, result)
+        assertTrue(result.isHit)
         val media = fixture.source.createdMedia.single()
         assertSame(media, selector.selected.value)
         assertEquals("https://example.com/play/$CHANNEL_1/3", media.originalUrl, "第 k+1 项")
         assertEquals(EpisodeRange.single(EpisodeSort(4)), media.episodeRange, "资源标为目标集")
         assertEquals(1, collected.onChangePreference.size, "正式选择写偏好")
         assertSame(media, collected.onSelect.single().event.media)
+        assertEquals(SelectOrigin.BROWSE_MEMORY, collected.onSelect.single().event.origin)
         assertEquals(memory(episodeIndex = 3, playedAsSort = EpisodeSort(4)), fixture.repository.get(SUBJECT_ID))
 
         // 再看下一集: 链式推进
         selector.unselect()
-        assertEquals(ReplayResult.SELECTED, fixture.useCase(SUBJECT_ID, episodeInfo(5), selector))
+        assertTrue(fixture.useCase(SUBJECT_ID, episodeInfo(5), selector).isHit)
         assertEquals("https://example.com/play/$CHANNEL_1/4", assertNotNull(selector.selected.value).originalUrl)
         assertEquals(memory(episodeIndex = 4, playedAsSort = EpisodeSort(5)), fixture.repository.get(SUBJECT_ID))
     }
@@ -172,11 +174,11 @@ class ReplayBrowseMemoryUseCaseTest {
         initSubject("孤独摇滚")
         val fixture = fixture(memory = memory(episodeIndex = 2, playedAsSort = EpisodeSort(3)))
 
-        assertEquals(ReplayResult.SELECTED, fixture.useCase(SUBJECT_ID, episodeInfo(7), selector))
+        assertTrue(fixture.useCase(SUBJECT_ID, episodeInfo(7), selector).isHit)
         assertEquals("https://example.com/play/$CHANNEL_1/6", assertNotNull(selector.selected.value).originalUrl)
 
         selector.unselect()
-        assertEquals(ReplayResult.SELECTED, fixture.useCase(SUBJECT_ID, episodeInfo(1), selector))
+        assertTrue(fixture.useCase(SUBJECT_ID, episodeInfo(1), selector).isHit)
         assertEquals("https://example.com/play/$CHANNEL_1/0", assertNotNull(selector.selected.value).originalUrl)
     }
 
@@ -189,7 +191,7 @@ class ReplayBrowseMemoryUseCaseTest {
         }
         val fixture = fixture(source = source, memory = memory(episodeIndex = 12, playedAsSort = EpisodeSort(1)))
 
-        assertEquals(ReplayResult.SELECTED, fixture.useCase(SUBJECT_ID, episodeInfo(2), selector))
+        assertTrue(fixture.useCase(SUBJECT_ID, episodeInfo(2), selector).isHit)
 
         assertEquals("https://example.com/play/$CHANNEL_1/13", assertNotNull(selector.selected.value).originalUrl, "OVA02, 不是正片的 02")
     }
@@ -200,7 +202,7 @@ class ReplayBrowseMemoryUseCaseTest {
         // 条目服务的集号从 13 开始, 站点从 01 重新编号: 上次把站点第一项当第 13 话播放
         val fixture = fixture(memory = memory(episodeIndex = 0, playedAsSort = EpisodeSort(13)))
 
-        assertEquals(ReplayResult.SELECTED, fixture.useCase(SUBJECT_ID, episodeInfo(sort = 14, ep = 2), selector))
+        assertTrue(fixture.useCase(SUBJECT_ID, episodeInfo(sort = 14, ep = 2), selector).isHit)
 
         val media = assertNotNull(selector.selected.value)
         assertEquals("https://example.com/play/$CHANNEL_1/1", media.originalUrl)
@@ -212,12 +214,12 @@ class ReplayBrowseMemoryUseCaseTest {
         initSubject("孤独摇滚")
         val fixture = fixture(memory = memory(episodeIndex = 2, playedAsSort = EpisodeSort(1, EpisodeType.SP)))
 
-        assertEquals(ReplayResult.NOT_FOUND, fixture.useCase(SUBJECT_ID, episodeInfo(2), selector))
+        assertIs<ReplayResult.NotFound>(fixture.useCase(SUBJECT_ID, episodeInfo(2), selector))
         assertNull(selector.selected.value)
 
         // 同一种特殊类型之间照常按偏移
         val sp2 = EpisodeInfo.Empty.copy(episodeId = 1, sort = EpisodeSort(2, EpisodeType.SP))
-        assertEquals(ReplayResult.SELECTED, fixture.useCase(SUBJECT_ID, sp2, selector))
+        assertTrue(fixture.useCase(SUBJECT_ID, sp2, selector).isHit)
         assertEquals("https://example.com/play/$CHANNEL_1/3", assertNotNull(selector.selected.value).originalUrl)
     }
 
@@ -227,9 +229,9 @@ class ReplayBrowseMemoryUseCaseTest {
         val fixture = fixture(memory = memory(episodeIndex = 2, playedAsSort = EpisodeSort(3)))
 
         val unparsable = EpisodeInfo.Empty.copy(episodeId = 1, sort = EpisodeSort("第三话"))
-        assertEquals(ReplayResult.NOT_FOUND, fixture.useCase(SUBJECT_ID, unparsable, selector))
+        assertIs<ReplayResult.NotFound>(fixture.useCase(SUBJECT_ID, unparsable, selector))
         val half = EpisodeInfo.Empty.copy(episodeId = 1, sort = EpisodeSort("3.5"))
-        assertEquals(ReplayResult.NOT_FOUND, fixture.useCase(SUBJECT_ID, half, selector))
+        assertIs<ReplayResult.NotFound>(fixture.useCase(SUBJECT_ID, half, selector))
 
         assertNull(selector.selected.value)
         assertTrue(fixture.source.createdMedia.isEmpty())
@@ -242,13 +244,13 @@ class ReplayBrowseMemoryUseCaseTest {
         val memory = memory(episodeIndex = 2, playedAsSort = EpisodeSort(3))
         val fixture = fixture(source = source, memory = memory)
 
-        assertEquals(ReplayResult.NOT_FOUND, fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
+        assertIs<ReplayResult.NotFound>(fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
         assertNull(selector.selected.value)
         assertEquals(1, source.browseCalls)
         assertEquals(memory, fixture.repository.get(SUBJECT_ID))
 
         // 记忆结构有效, 只是这一集不存在: 下次仍会请求 (站点可能已更新)
-        assertEquals(ReplayResult.NOT_FOUND, fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
+        assertIs<ReplayResult.NotFound>(fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
         assertEquals(2, source.browseCalls)
     }
 
@@ -265,7 +267,7 @@ class ReplayBrowseMemoryUseCaseTest {
         }
         val fixture = fixture(source = source, memory = memory(channelIndex = 0, channelName = CHANNEL_1))
 
-        assertEquals(ReplayResult.SELECTED, fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
+        assertTrue(fixture.useCase(SUBJECT_ID, episodeInfo(4), selector).isHit)
 
         assertEquals("https://example.com/play/$CHANNEL_1/3", assertNotNull(selector.selected.value).originalUrl)
         assertEquals(
@@ -283,7 +285,7 @@ class ReplayBrowseMemoryUseCaseTest {
         }
         val fixture = fixture(source = source, memory = memory(channelIndex = 1, channelName = CHANNEL_1))
 
-        assertEquals(ReplayResult.SELECTED, fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
+        assertTrue(fixture.useCase(SUBJECT_ID, episodeInfo(4), selector).isHit)
 
         assertEquals("https://example.com/play/b/3", assertNotNull(selector.selected.value).originalUrl)
     }
@@ -294,7 +296,7 @@ class ReplayBrowseMemoryUseCaseTest {
         val source = FakeBrowsableSource().apply { channels = listOf(channel(null, numberedSorts(12))) }
         val fixture = fixture(source = source, memory = memory(channelIndex = 0, channelName = null))
 
-        assertEquals(ReplayResult.SELECTED, fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
+        assertTrue(fixture.useCase(SUBJECT_ID, episodeInfo(4), selector).isHit)
 
         assertEquals("", assertNotNull(selector.selected.value).properties.alliance)
     }
@@ -305,14 +307,14 @@ class ReplayBrowseMemoryUseCaseTest {
         val source = FakeBrowsableSource().apply { channels = listOf(channel("线路9", numberedSorts(12))) }
         val fixture = fixture(source = source, memory = memory(channelIndex = 0, channelName = CHANNEL_1))
 
-        assertEquals(ReplayResult.NOT_FOUND, fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
+        assertIs<ReplayResult.NotFound>(fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
 
         assertNull(selector.selected.value)
         assertTrue(source.createdMedia.isEmpty())
         assertNull(fixture.repository.get(SUBJECT_ID), "线路列表非空但找不到记住的线路: 记忆已结构性失效")
 
         // 没有记忆了, 不再请求条目页
-        assertEquals(ReplayResult.NOT_FOUND, fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
+        assertIs<ReplayResult.NotFound>(fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
         assertEquals(1, source.browseCalls)
     }
 
@@ -325,7 +327,7 @@ class ReplayBrowseMemoryUseCaseTest {
         val rewritten = memory(channelIndex = 2, channelName = "线路9", episodeIndex = 3, playedAsSort = EpisodeSort(4))
         source.onBrowse = { fixture.repository.set(SUBJECT_ID, rewritten) }
 
-        assertEquals(ReplayResult.NOT_FOUND, fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
+        assertIs<ReplayResult.NotFound>(fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
 
         assertEquals(rewritten, fixture.repository.get(SUBJECT_ID), "只删本次读到的旧记忆, 用户刚写入的新记忆保留")
     }
@@ -340,7 +342,7 @@ class ReplayBrowseMemoryUseCaseTest {
         mediaApi.addMedia(current)
         source.onBrowse = { assertTrue(selector.select(current)) }
 
-        assertEquals(ReplayResult.NOT_FOUND, fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
+        assertIs<ReplayResult.NotFound>(fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
 
         assertSame(current, selector.selected.value)
         assertEquals(memory, fixture.repository.get(SUBJECT_ID), "用户已手动选择时不删记忆")
@@ -354,7 +356,7 @@ class ReplayBrowseMemoryUseCaseTest {
         val rewritten = memory(channelIndex = 1, channelName = "线路2", episodeIndex = 0, playedAsSort = EpisodeSort(4))
         source.onBrowse = { fixture.repository.set(SUBJECT_ID, rewritten) }
 
-        assertEquals(ReplayResult.SELECTED, fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
+        assertTrue(fixture.useCase(SUBJECT_ID, episodeInfo(4), selector).isHit)
 
         assertSame(source.createdMedia.single(), selector.selected.value, "回放时还没有选择, 仍然选中")
         assertEquals(rewritten, fixture.repository.get(SUBJECT_ID), "记忆更新是 CAS, 不覆盖用户刚写入的新记忆")
@@ -371,21 +373,21 @@ class ReplayBrowseMemoryUseCaseTest {
         val memory = memory()
         val fixture = fixture(source = source, memory = memory)
 
-        assertEquals(ReplayResult.NOT_FOUND, fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
+        assertIs<ReplayResult.NotFound>(fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
         assertEquals(1, source.browseCalls)
         assertEquals(memory, fixture.repository.get(SUBJECT_ID), "持久化记忆保留")
 
         fixture.clock.advance(9.minutes)
-        assertEquals(ReplayResult.NOT_FOUND, fixture.useCase(SUBJECT_ID, episodeInfo(5), selector))
+        assertIs<ReplayResult.NotFound>(fixture.useCase(SUBJECT_ID, episodeInfo(5), selector))
         assertEquals(1, source.browseCalls, "10 分钟内同一记忆不再请求")
 
         fixture.clock.advance(2.minutes)
-        assertEquals(ReplayResult.NOT_FOUND, fixture.useCase(SUBJECT_ID, episodeInfo(5), selector))
+        assertIs<ReplayResult.NotFound>(fixture.useCase(SUBJECT_ID, episodeInfo(5), selector))
         assertEquals(2, source.browseCalls, "过期后重新请求")
 
         // 用户重新「播放并记住」得到新记忆: 缓存只对相等的记忆生效
         fixture.repository.set(SUBJECT_ID, memory.copy(subject = BrowseSubject("孤独摇滚 (新)", "https://example.com/subject/2")))
-        assertEquals(ReplayResult.NOT_FOUND, fixture.useCase(SUBJECT_ID, episodeInfo(5), selector))
+        assertIs<ReplayResult.NotFound>(fixture.useCase(SUBJECT_ID, episodeInfo(5), selector))
         assertEquals(3, source.browseCalls)
     }
 
@@ -400,11 +402,11 @@ class ReplayBrowseMemoryUseCaseTest {
         val memory = memory()
         val fixture = fixture(source = source, memory = memory)
 
-        assertEquals(ReplayResult.NOT_FOUND, fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
+        assertIs<ReplayResult.NotFound>(fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
         assertNull(selector.selected.value)
         assertEquals(memory, fixture.repository.get(SUBJECT_ID))
 
-        assertEquals(ReplayResult.NOT_FOUND, fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
+        assertIs<ReplayResult.NotFound>(fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
         assertEquals(2, source.browseCalls, "网络错误不记入结构性未命中缓存")
     }
 
@@ -414,10 +416,10 @@ class ReplayBrowseMemoryUseCaseTest {
         val source = FakeBrowsableSource().apply { browseDelay = ReplayBrowseMemoryUseCaseImpl.REPLAY_TIMEOUT + 5.seconds }
         val fixture = fixture(source = source)
 
-        assertEquals(ReplayResult.NOT_FOUND, fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
+        assertIs<ReplayResult.NotFound>(fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
         assertNull(selector.selected.value)
 
-        assertEquals(ReplayResult.NOT_FOUND, fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
+        assertIs<ReplayResult.NotFound>(fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
         assertEquals(2, source.browseCalls)
     }
 
@@ -429,7 +431,7 @@ class ReplayBrowseMemoryUseCaseTest {
         mediaApi.addMedia(current)
         assertTrue(selector.select(current))
 
-        assertEquals(ReplayResult.NOT_FOUND, fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
+        assertIs<ReplayResult.NotFound>(fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
 
         assertEquals(0, fixture.source.browseCalls)
         assertSame(current, selector.selected.value)
@@ -440,7 +442,7 @@ class ReplayBrowseMemoryUseCaseTest {
         initSubject("孤独摇滚")
         val fixture = fixture(memory = null)
 
-        assertEquals(ReplayResult.NOT_FOUND, fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
+        assertIs<ReplayResult.NotFound>(fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
 
         assertEquals(0, fixture.source.browseCalls)
         assertNull(selector.selected.value)
@@ -452,7 +454,7 @@ class ReplayBrowseMemoryUseCaseTest {
         val memory = memory()
         val fixture = fixture(memory = memory, instanceEnabled = false)
 
-        assertEquals(ReplayResult.NOT_FOUND, fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
+        assertIs<ReplayResult.NotFound>(fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
 
         assertEquals(0, fixture.source.browseCalls)
         assertEquals(memory, fixture.repository.get(SUBJECT_ID))
@@ -463,7 +465,7 @@ class ReplayBrowseMemoryUseCaseTest {
         initSubject("孤独摇滚")
         val fixture = fixture(source = FakeBrowsableSource(supportsBrowsing = false))
 
-        assertEquals(ReplayResult.NOT_FOUND, fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
+        assertIs<ReplayResult.NotFound>(fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
 
         assertEquals(0, fixture.source.browseCalls)
     }
@@ -473,7 +475,7 @@ class ReplayBrowseMemoryUseCaseTest {
         initSubject("孤独摇滚")
         val fixture = fixture(memory = memory(mediaSourceId = "web-other"))
 
-        assertEquals(ReplayResult.NOT_FOUND, fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
+        assertIs<ReplayResult.NotFound>(fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
 
         assertEquals(0, fixture.source.browseCalls)
     }
@@ -487,7 +489,7 @@ class ReplayBrowseMemoryUseCaseTest {
             store = FailingWriteStore(ManualBrowseMemories(mapOf(SUBJECT_ID to memory()))),
         )
 
-        assertEquals(ReplayResult.SELECTED, fixture.useCase(SUBJECT_ID, episodeInfo(4), selector))
+        assertTrue(fixture.useCase(SUBJECT_ID, episodeInfo(4), selector).isHit)
 
         assertSame(source.createdMedia.single(), selector.selected.value)
     }

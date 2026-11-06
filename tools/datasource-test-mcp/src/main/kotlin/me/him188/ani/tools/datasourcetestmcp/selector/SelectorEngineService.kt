@@ -134,6 +134,7 @@ class SelectorEngineService(
 
         val allSubjectNames = context.subjectNames.toSet()
         val medias = mutableListOf<DefaultMedia>()
+        val allSubjects = mutableListOf<WebSubjectCandidate>()
 
         val namesToSearch = context.subjectNames.take(config.autoMatch.searchUseSubjectNamesCount.coerceAtLeast(1))
         // 验证码自动解决失败时, 终止整个数据源的流程: 不再换搜索词硬试, 也不对站点继续发请求
@@ -203,8 +204,39 @@ class SelectorEngineService(
                         ?: error("配置无效: 条目格式 (subjectFormat) 的必填项为空或 selector 语法错误")
                 } ?: continue
                 if (subjects.isEmpty()) continue
+                allSubjects += subjects.mapIndexed { index, info ->
+                    WebSubjectCandidate(
+                        keyword = subjectName,
+                        name = info.name,
+                        fullUrl = info.fullUrl,
+                        partialUrl = info.partialUrl,
+                        order = index,
+                    )
+                }
+                if (input.listSubjectsOnly) continue
 
-                for (subjectInfo in subjects.take(input.maxSubjectsPerName.coerceAtLeast(1))) {
+                // 指定了条目就只展开指定的; 否则按引擎自动匹配顺序取前 maxSubjectsPerName 个
+                val subjectsToExpand = input.subjectUrls?.let { urls ->
+                    val picked = subjects.filter { it.fullUrl in urls || it.partialUrl in urls }
+                    steps += StageResult(
+                        name = "pickSubjects",
+                        status = if (picked.isEmpty()) "failed" else "success",
+                        summary = if (picked.isEmpty()) {
+                            "指定条目不在 \"$subjectName\" 的搜索结果中"
+                        } else {
+                            "按指定条目展开 ${picked.size} 个: ${picked.joinToString { it.name }}"
+                        },
+                        details = buildJsonObject {
+                            putJsonArray("subjectUrls") { urls.forEach { add(JsonPrimitive(it)) } }
+                            put("picked", subjectsJson(picked, cap = 20))
+                        },
+                        errors = if (picked.isEmpty()) listOf("subjectUrls 未命中任何搜索结果") else emptyList(),
+                        durationMillis = 0,
+                    )
+                    picked
+                } ?: subjects.take(input.maxSubjectsPerName.coerceAtLeast(1))
+
+                for (subjectInfo in subjectsToExpand) {
                     val episodePage = runStage(
                         "searchEpisodes", steps,
                         describe = { result: WebPageFetchResult<SelectedChannelEpisodes> ->
@@ -300,6 +332,16 @@ class SelectorEngineService(
             )
         }
 
+        if (input.listSubjectsOnly) {
+            return SelectorResolveEpisodeResult(
+                ok = allSubjects.isNotEmpty(),
+                summary = "搜索到 ${allSubjects.size} 个条目 (仅列出条目, 未访问详情页)",
+                steps = steps,
+                subjects = allSubjects,
+                errors = steps.filter { it.status == "failed" }.flatMap { it.errors },
+            )
+        }
+
         val distinctMedias = medias.distinctBy { it.mediaId }
         val candidates = distinctMedias.map { it.toWebMediaCandidate() }
 
@@ -308,6 +350,7 @@ class SelectorEngineService(
                 ok = false,
                 summary = "引擎全流程执行完毕, 但没有找到匹配的剧集",
                 steps = steps,
+                subjects = allSubjects,
                 errors = steps.filter { it.status == "failed" }.flatMap { it.errors },
             )
         }
@@ -318,6 +361,7 @@ class SelectorEngineService(
                 summary = "找到 ${distinctMedias.size} 个候选播放页 (未运行视频解析)",
                 steps = steps,
                 medias = candidates,
+                subjects = allSubjects,
             )
         }
 
@@ -365,6 +409,7 @@ class SelectorEngineService(
             },
             steps = steps,
             medias = candidates,
+            subjects = allSubjects,
             extractResults = extractResults,
             errors = errors,
             resolvedCount = resolved.size,
@@ -568,7 +613,7 @@ class SelectorEngineService(
     private fun stepMatchWebVideo(input: SelectorRunStepInput): SelectorRunStepResult {
         val config = requireConfig(input)
         val url = requireNotNull(input.url) { "matchWebVideo 步骤需要 url 参数" }
-        val matchResult = engine.matchWebVideo(url, config.matchVideo)
+        val matchResult = engine.matchWebVideo(url, config.matchVideo, config.userAgentOrNull)
         val (kind, video) = when (matchResult) {
             is WebVideoMatcher.MatchResult.Matched -> "matched" to matchResult.video
             WebVideoMatcher.MatchResult.LoadPage -> "loadPage" to null
@@ -677,9 +722,9 @@ class SelectorEngineService(
             ?: SelectorSearchConfig.Empty.requestInterval
     }
 
-    /** 与 App 的 `SelectorMediaSource.matcher` 一致: 配置里的 cookies 之上再叠加验证码会话的 cookies. */
+    /** 与 App 的 `SelectorMediaSource.matcher` 一致: 配置里的 cookies 之上再叠加验证码会话的 cookies, 并应用配置的 User-Agent. */
     private fun selectorWebVideoMatcher(config: SelectorSearchConfig): SelectorWebVideoMatcher {
-        return SelectorWebVideoMatcher(engine, config.matchVideo) {
+        return SelectorWebVideoMatcher(engine, config.matchVideo, config.userAgentOrNull) {
             webSource.cookieJar.getCookieHeaderValues(config.searchUrl)
         }
     }
@@ -833,6 +878,8 @@ class SelectorEngineService(
 class SelectorWebVideoMatcher(
     private val engine: SelectorMediaSourceEngine,
     private val matchVideoConfig: SelectorSearchConfig.MatchVideoConfig,
+    /** 数据源配置的 UA ([SelectorSearchConfig.userAgentOrNull]). */
+    private val userAgent: String? = null,
     /**
      * 该站点已解出的验证码会话 cookies. 与 App 一样, HTTP 与播放器 WebView 共用同一份 cookie 真相,
      * 播放页才能沿用刚刚解掉验证码的会话.
@@ -842,15 +889,10 @@ class SelectorWebVideoMatcher(
     override fun match(
         url: String,
         context: WebVideoMatcherContext,
-    ): WebVideoMatcher.MatchResult = engine.matchWebVideo(url, matchVideoConfig)
+    ): WebVideoMatcher.MatchResult = engine.matchWebVideo(url, matchVideoConfig, userAgent)
 
-    override fun patchConfig(config: WebViewConfig): WebViewConfig {
-        val configuredCookies = matchVideoConfig.cookies.lines().filter { it.isNotBlank() }
-        // 复用 SelectorMediaSource.matcher 的合并实现: 按 cookie 名去重, 后面的覆盖前面的
-        return config.copy(
-            cookies = SelectorMediaSource.mergeCookies(config.cookies, configuredCookies, captchaCookies()),
-        )
-    }
+    override fun patchConfig(config: WebViewConfig): WebViewConfig =
+        SelectorMediaSource.patchWebViewConfig(config, matchVideoConfig, userAgent, captchaCookies())
 }
 
 internal fun createWebMediaForPage(pageUrl: String, mediaSourceId: String): DefaultMedia {
